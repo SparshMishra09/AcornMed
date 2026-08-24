@@ -6,7 +6,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/app_theme.dart';
+import '../../core/utils/friendly_error.dart';
 import '../../data/services/model_manager.dart';
+import '../../data/services/model_recommender.dart';
 import '../../providers/chat_providers.dart';
 
 class ModelSetupScreen extends ConsumerStatefulWidget {
@@ -22,11 +24,49 @@ class _ModelSetupScreenState extends ConsumerState<ModelSetupScreen> {
   StreamSubscription<DownloadProgress>? _sub;
   bool _importing = false;
   List<File> _installed = [];
+  List<ModelFit> _ranked = [];
+  bool _scanning = false;
 
   @override
   void initState() {
     super.initState();
     _refreshInstalled();
+    _scanDevice();
+  }
+
+  /// Probes the device once and ranks every catalog model by how well it fits
+  /// (smart + tool-capable + fast). Failures just leave the list unranked so
+  /// the user can still pick manually.
+  Future<void> _scanDevice() async {
+    if (!mounted) return;
+    setState(() => _scanning = true);
+    try {
+      final profile = await DeviceProfile.detect();
+      final ranked = rankModels(ModelCatalog.options, profile);
+      if (!mounted) return;
+      setState(() {
+        _ranked = ranked;
+        _scanning = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _scanning = false);
+    }
+  }
+
+  ModelFit? get _best {
+    if (_ranked.isEmpty) return null;
+    final top = _ranked.first;
+    return top.feasible ? top : null;
+  }
+
+  Future<void> _useRecommended(ModelFit fit) async {
+    final installed =
+        _installed.any((f) => f.path.endsWith(fit.option.fileName));
+    if (installed) {
+      await _finishWithFile(fit.option.fileName);
+    } else {
+      _startDownload(fit.option);
+    }
   }
 
   Future<void> _refreshInstalled() async {
@@ -42,6 +82,7 @@ class _ModelSetupScreenState extends ConsumerState<ModelSetupScreen> {
   }
 
   void _startDownload(ModelOption option) {
+    if (_downloading != null) return; // One download at a time.
     setState(() {
       _downloading = option;
       _progress = null;
@@ -62,9 +103,14 @@ class _ModelSetupScreenState extends ConsumerState<ModelSetupScreen> {
           _downloading = null;
           _progress = null;
         });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Download failed: $e')),
-        );
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(
+            SnackBar(
+              content: Text(_downloadErrorText(e)),
+              duration: const Duration(seconds: 5),
+            ),
+          );
       },
       onDone: () {
         if (_downloading != null && _progress?.isDone != true) {
@@ -77,6 +123,29 @@ class _ModelSetupScreenState extends ConsumerState<ModelSetupScreen> {
         }
       },
     );
+  }
+
+  /// Downloads are resumable (the .part file is kept), so every failure
+  /// message reassures the user and points at the same Download button.
+  String _downloadErrorText(Object e) {
+    final s = e.toString().toLowerCase();
+    if (s.contains('connection closed') ||
+        s.contains('socket') ||
+        s.contains('clientexception') ||
+        s.contains('failed host lookup') ||
+        s.contains('connection refused')) {
+      return 'The connection dropped — your progress is saved. '
+          'Tap Download to pick up where it left off.';
+    }
+    if (s.contains('timeout')) {
+      return 'The download timed out — your progress is saved. '
+          'Tap Download to resume.';
+    }
+    if (s.contains('http')) {
+      return 'The model server is having trouble right now. '
+          'Please try again in a little while.';
+    }
+    return friendlyError(e);
   }
 
   Future<void> _finishWithFile(String fileName) async {
@@ -116,11 +185,56 @@ class _ModelSetupScreenState extends ConsumerState<ModelSetupScreen> {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Import failed: $e')),
+        SnackBar(
+          content: Text(
+            e is FormatException
+                ? e.message
+                : 'Couldn\'t import this file. Make sure it\'s a valid '
+                    '.gguf model and try again.',
+          ),
+        ),
       );
     } finally {
       if (mounted) setState(() => _importing = false);
     }
+  }
+
+  Future<void> _confirmDeleteModel(File file) async {
+    final activeFile = ref.read(chatControllerProvider).modelFile;
+    final isActive = activeFile != null && activeFile.path == file.path;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('Delete model?'),
+          content: Text(
+            '${file.uri.pathSegments.last} will be permanently removed from '
+            'this device.'
+            '${isActive ? '\n\nThis is your active model — the app will '
+                'need to set one up again before you can chat.' : ''}',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: AppColors.error),
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('Delete'),
+            ),
+          ],
+        );
+      },
+    );
+    if (confirmed != true) return;
+    if (isActive) {
+      // Unload first — deleting an mmap'd model file while the engine is
+      // running is undefined behaviour.
+      await ref.read(chatControllerProvider.notifier).unloadActiveModel();
+    }
+    await ModelManager.instance.deleteModelFile(file);
+    await _refreshInstalled();
   }
 
   String _formatBytes(int bytes) {
@@ -157,12 +271,22 @@ class _ModelSetupScreenState extends ConsumerState<ModelSetupScreen> {
             ),
           ),
           const SizedBox(height: 16),
+          if (_scanning || _best != null) ...[
+            _RecommendationBanner(
+              scanning: _scanning,
+              best: _best,
+              onUse: _best != null ? () => _useRecommended(_best!) : null,
+            ),
+            const SizedBox(height: 16),
+          ],
           for (final option in ModelCatalog.options)
             _ModelCard(
               option: option,
               isDownloading: _downloading?.id == option.id,
               progress: _downloading?.id == option.id ? _progress : null,
               isInstalled: _installed.any((f) => f.path.endsWith(option.fileName)),
+              recommended: _best?.option.id == option.id,
+              fit: _best?.option.id == option.id ? _best : null,
               onDownload: () => _startDownload(option),
               onCancel: () {
                 ModelManager.instance.cancelDownload();
@@ -223,10 +347,7 @@ class _ModelSetupScreenState extends ConsumerState<ModelSetupScreen> {
               _InstalledTile(
                 file: file,
                 formatBytes: _formatBytes,
-                onDelete: () async {
-                  await ModelManager.instance.deleteModelFile(file);
-                  await _refreshInstalled();
-                },
+                onDelete: () => _confirmDeleteModel(file),
               ),
           ],
         ],
@@ -241,6 +362,8 @@ class _ModelCard extends StatelessWidget {
     required this.isDownloading,
     required this.progress,
     required this.isInstalled,
+    this.recommended = false,
+    this.fit,
     required this.onDownload,
     required this.onCancel,
     required this.onUse,
@@ -250,6 +373,8 @@ class _ModelCard extends StatelessWidget {
   final bool isDownloading;
   final DownloadProgress? progress;
   final bool isInstalled;
+  final bool recommended;
+  final ModelFit? fit;
   final VoidCallback onDownload;
   final VoidCallback onCancel;
   final VoidCallback onUse;
@@ -263,13 +388,36 @@ class _ModelCard extends StatelessWidget {
         color: Colors.white,
         borderRadius: BorderRadius.circular(20),
         border: Border.all(
-          color: isDownloading ? AppColors.mustard : AppColors.outlineSoft,
-          width: isDownloading ? 1.5 : 1,
+          color: recommended
+              ? AppColors.sageDark
+              : isDownloading
+                  ? AppColors.mustard
+                  : AppColors.outlineSoft,
+          width: recommended || isDownloading ? 1.5 : 1,
         ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          if (recommended) ...[
+            Row(
+              children: [
+                const Icon(Icons.auto_awesome_rounded,
+                    size: 14, color: AppColors.sageDark),
+                const SizedBox(width: 6),
+                const Text(
+                  'BEST FOR YOUR DEVICE',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.8,
+                    color: AppColors.sageDark,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+          ],
           Row(
             children: [
               Expanded(
@@ -309,6 +457,19 @@ class _ModelCard extends StatelessWidget {
               color: AppColors.coffee.withValues(alpha: 0.65),
             ),
           ),
+          if (recommended && fit != null) ...[
+            const SizedBox(height: 12),
+            _PillarMeter(
+                label: 'Smart', value: fit!.qualityScore, icon: Icons.psychology),
+            const SizedBox(height: 6),
+            _PillarMeter(
+                label: 'Tool-ready',
+                value: fit!.toolScore,
+                icon: Icons.build_circle_outlined),
+            const SizedBox(height: 6),
+            _PillarMeter(
+                label: 'Fast', value: fit!.speedScore, icon: Icons.flash_on),
+          ],
           const SizedBox(height: 14),
           if (isDownloading && progress != null) ...[
             ClipRRect(
@@ -367,6 +528,189 @@ class _ModelCard extends StatelessWidget {
     return mb >= 1024
         ? '${(mb / 1024).toStringAsFixed(2)} GB'
         : '${mb.toStringAsFixed(0)} MB';
+  }
+}
+
+class _RecommendationBanner extends StatelessWidget {
+  const _RecommendationBanner({
+    required this.scanning,
+    required this.best,
+    required this.onUse,
+  });
+
+  final bool scanning;
+  final ModelFit? best;
+  final VoidCallback? onUse;
+
+  @override
+  Widget build(BuildContext context) {
+    if (scanning) {
+      return Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: AppColors.sageLight,
+          borderRadius: BorderRadius.circular(18),
+        ),
+        child: const Row(
+          children: [
+            SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            SizedBox(width: 12),
+            Text(
+              'Checking your device for the best model…',
+              style: TextStyle(
+                fontSize: 13.5,
+                fontWeight: FontWeight.w600,
+                color: AppColors.sageDeep,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+    if (best == null) return const SizedBox.shrink();
+
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [AppColors.sageDark, AppColors.sageDeep],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.auto_awesome_rounded, size: 16, color: Colors.white),
+              SizedBox(width: 8),
+              Text(
+                'RECOMMENDED FOR YOUR DEVICE',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.8,
+                  color: Colors.white,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  best!.option.name,
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w800,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.18),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  best!.option.sizeLabel,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            best!.reason,
+            style: const TextStyle(
+              fontSize: 12.5,
+              height: 1.45,
+              color: Colors.white,
+            ),
+          ),
+          const SizedBox(height: 14),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              onPressed: onUse,
+              icon: const Icon(Icons.rocket_launch_rounded),
+              label: const Text('Use this model'),
+              style: FilledButton.styleFrom(
+                backgroundColor: Colors.white,
+                foregroundColor: AppColors.sageDeep,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PillarMeter extends StatelessWidget {
+  const _PillarMeter({
+    required this.label,
+    required this.value,
+    required this.icon,
+  });
+
+  final String label;
+  final double value;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    final pct = value.clamp(0.0, 100.0);
+    return Row(
+      children: [
+        Icon(icon, size: 14, color: AppColors.sageDeep),
+        const SizedBox(width: 8),
+        SizedBox(
+          width: 64,
+          child: Text(
+            label,
+            style: const TextStyle(
+              fontSize: 11.5,
+              fontWeight: FontWeight.w600,
+              color: AppColors.coffee,
+            ),
+          ),
+        ),
+        Expanded(
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: LinearProgressIndicator(
+              value: pct / 100,
+              minHeight: 6,
+              backgroundColor: AppColors.sageLight,
+              color: AppColors.sageDark,
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Text(
+          '${pct.round()}',
+          style: const TextStyle(
+            fontSize: 11.5,
+            fontWeight: FontWeight.w700,
+            color: AppColors.coffeeSoft,
+          ),
+        ),
+      ],
+    );
   }
 }
 

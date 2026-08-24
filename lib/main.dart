@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -18,16 +20,24 @@ Future<void> main() async {
     DeviceOrientation.portraitDown,
   ]);
   await StorageService.instance.init();
+  // Fire-and-forget with explicit error handling — an indexing failure must
+  // never crash the app or go silently unreported in the zone.
   unawaited(_initKnowledge());
   runApp(const ProviderScope(child: AcornMedApp()));
 }
 
 Future<void> _initKnowledge() async {
-  await KnowledgeService.instance.init();
-  await DocumentService.instance.reindexAll();
+  try {
+    await KnowledgeService.instance.init();
+  } catch (e) {
+    debugPrint('[Init] Knowledge base failed to load: $e');
+  }
+  try {
+    await DocumentService.instance.reindexAll();
+  } catch (e) {
+    debugPrint('[Init] Document reindex failed: $e');
+  }
 }
-
-void unawaited(Future<void> future) {}
 
 class AcornMedApp extends StatelessWidget {
   const AcornMedApp({super.key});

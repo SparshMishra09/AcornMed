@@ -41,6 +41,7 @@ class KnowledgeService {
   final List<KnowledgeChunk> _chunks = [];
   final List<Map<String, double>> _chunkVectors = [];
   final Map<String, double> _idf = {};
+  final Set<String> _indexedDocIds = {};
   bool _ready = false;
 
   bool get isReady => _ready;
@@ -82,11 +83,13 @@ class KnowledgeService {
     required String docId,
     required String name,
     required String text,
+    bool rebuildIndex = true,
   }) {
-    removeDocument(docId);
+    removeDocument(docId, rebuildIndex: false);
+    _indexedDocIds.add(docId);
     final label = name.replaceAll(RegExp(r'\.[a-zA-Z0-9]+$'), '');
     debugLog('Ingesting document: "$name" (${text.length} chars)');
-    
+
     final lines = text.split('\n');
     final buffer = StringBuffer();
     var heading = label;
@@ -102,7 +105,7 @@ class KnowledgeService {
           docId: docId,
         ));
         final shortHeading = heading.length > 50 ? heading.substring(0, 50) : heading;
-        debugLog('  Chunk #$chunkIndex: "$shortHeading..." ($chunkText.length chars)');
+        debugLog('  Chunk #$chunkIndex: "$shortHeading..." (${chunkText.length} chars)');
         chunkIndex++;
       }
       buffer.clear();
@@ -121,12 +124,20 @@ class KnowledgeService {
       }
     }
     flush();
-    _buildIndex();
+    // Rebuilding the TF-IDF index is O(chunks²)-ish; callers that ingest
+    // many documents in a loop pass rebuildIndex:false and call
+    // [rebuildIndex] once at the end.
+    if (rebuildIndex) _buildIndex();
   }
 
-  void removeDocument(String docId) {
+  bool hasDocument(String docId) => _indexedDocIds.contains(docId);
+
+  void rebuildIndex() => _buildIndex();
+
+  void removeDocument(String docId, {bool rebuildIndex = true}) {
     _chunks.removeWhere((c) => c.docId == docId);
-    _buildIndex();
+    _indexedDocIds.remove(docId);
+    if (rebuildIndex) _buildIndex();
   }
 
   void _ingestMarkdown(String subject, String markdown) {
@@ -309,7 +320,10 @@ class KnowledgeService {
       debugLog('Retrieving from ${attachedDocIds.length} document(s)...');
       final docHits = retrieve(query, topK: topK * 2, docIds: attachedDocIds);
       debugLog('Found ${docHits.length} matching passages from user documents');
-      
+
+      // Attached documents get priority in the context budget.
+      const maxDocContextChars = 6000;
+
       if (docHits.isNotEmpty) {
         debugLog('Adding ${docHits.length} document passages to context');
         sb.writeln(
@@ -317,6 +331,10 @@ class KnowledgeService {
           'conversation (ground your answer in these where applicable):',
         );
         for (final hit in docHits) {
+          if (sb.length >= maxDocContextChars) {
+            debugLog('Doc context cap reached — truncating');
+            break;
+          }
           final shortHeading = hit.heading.length > 50 ? hit.heading.substring(0, 50) : hit.heading;
           debugLog('  - "${hit.subject}: $shortHeading" (${hit.text.length} chars)');
           sb.writeln('--- [Document "${hit.subject}": ${hit.heading}] ---');
@@ -325,10 +343,11 @@ class KnowledgeService {
         }
       } else {
         debugLog('⚠️ NO MATCHING PASSAGES FOUND IN USER DOCUMENTS — using fallback');
-        // Fallback: include first chunks from attached documents so "what's in this document" works
+        // Fallback: include first chunks from attached documents so "what's
+        // in this document" style queries still see the content.
         final fallbackChunks = getChunksForDocIds(attachedDocIds);
         if (fallbackChunks.isNotEmpty) {
-          debugLog('Adding ${fallbackChunks.length} fallback chunks from attached documents');
+          debugLog('Adding fallback chunks from attached documents');
           sb.writeln(
             'Content from the documents the student attached to this conversation '
             '(no specific passages matched the query, so showing document content):',
@@ -336,6 +355,10 @@ class KnowledgeService {
           // Limit to first 3 chunks per document to avoid overwhelming context
           final Map<String, int> docChunkCount = {};
           for (final chunk in fallbackChunks) {
+            if (sb.length >= maxDocContextChars) {
+              debugLog('Doc fallback cap reached — truncating');
+              break;
+            }
             final docId = chunk.docId!;
             final count = docChunkCount[docId] ?? 0;
             if (count < 3) {
@@ -354,13 +377,21 @@ class KnowledgeService {
     debugLog('Retrieving from bundled knowledge base...');
     final kbHits = retrieve(query, topK: topK);
     debugLog('Found ${kbHits.length} matching passages from bundled knowledge');
-    
-    if (kbHits.isNotEmpty) {
+
+    // Hard cap on injected context — a flood of passages (large documents,
+    // many attachments) would otherwise overflow the model's context window
+    // and push out the actual question.
+    const maxContextChars = 6000;
+    if (kbHits.isNotEmpty && sb.length < maxContextChars) {
       sb.writeln(
         'Relevant notes from the student\'s bundled knowledge base '
         '(use these to ground your answer where applicable):',
       );
       for (final hit in kbHits) {
+        if (sb.length >= maxContextChars) {
+          debugLog('Context cap reached — truncating bundled passages');
+          break;
+        }
         debugLog('  - "${hit.subject}: ${hit.heading}" (${hit.text.length} chars)');
         sb.writeln('--- [${hit.subject}: ${hit.heading}] ---');
         sb.writeln(hit.text);

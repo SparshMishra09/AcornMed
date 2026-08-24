@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/app_theme.dart';
 import '../../data/services/knowledge_service.dart';
-import '../../data/services/storage_service.dart';
 import '../../providers/chat_providers.dart';
 import '../model_setup/model_setup_screen.dart';
 
@@ -169,8 +168,9 @@ class SettingsScreen extends ConsumerWidget {
               style: FilledButton.styleFrom(backgroundColor: AppColors.error),
               onPressed: () async {
                 Navigator.of(dialogContext).pop();
-                await StorageService.instance.clearAll();
-                ref.read(chatControllerProvider.notifier).newConversation();
+                await ref
+                    .read(chatControllerProvider.notifier)
+                    .clearAllConversations();
                 if (context.mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(content: Text('All chats cleared')),

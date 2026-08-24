@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
 import '../../core/theme/app_theme.dart';
+import '../../core/utils/friendly_error.dart';
 import '../../data/models/document_item.dart';
 import '../../data/services/document_service.dart';
 import '../../data/services/storage_service.dart';
@@ -28,17 +29,22 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
         allowMultiple: true,
       );
       if (result == null || result.files.isEmpty) return;
-
       var imported = 0;
-      final errors = <String>[];
+      String? firstError;
       for (final file in result.files) {
         final path = file.path;
-        if (path == null) continue;
+        if (path == null) {
+          firstError ??=
+              '"${file.name}" couldn\'t be opened. Try moving it to the '
+              'Downloads folder and adding it again.';
+          continue;
+        }
         try {
           await DocumentService.instance.importDocument(path);
           imported++;
         } catch (e) {
-          errors.add('${file.name}: $e');
+          firstError ??= '"${file.name}": '
+              '${e is FormatException ? e.message : friendlyError(e)}';
         }
       }
       if (!mounted) return;
@@ -53,11 +59,22 @@ class _DocumentsScreenState extends ConsumerState<DocumentsScreen> {
           ),
         );
       }
-      if (errors.isNotEmpty) {
+      if (firstError != null) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(errors.first)),
+          SnackBar(
+            content: Text(firstError),
+            duration: const Duration(seconds: 5),
+          ),
         );
       }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(friendlyError(e)),
+          duration: const Duration(seconds: 5),
+        ),
+      );
     } finally {
       if (mounted) setState(() => _importing = false);
     }

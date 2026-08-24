@@ -32,18 +32,36 @@ class WebSearchService {
 
   static const Duration _timeout = Duration(seconds: 12);
 
+  /// Cleans up a user question / model-generated query before hitting the
+  /// search engines. Quoted or over-long queries produce junk results
+  /// (literal-match pages, unrelated fallbacks).
+  String sanitizeQuery(String raw) {
+    var q = raw
+        .replaceAll('"', ' ')
+        .replaceAll(RegExp(r'\[\s*SEARCH\s*:|\]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    if (q.length > 120) {
+      q = q.substring(0, 120).trim();
+    }
+    return q;
+  }
+
   Future<List<WebSearchResult>> search(String query, {int maxPerSource = 4}) async {
-    _debugLog('Searching for: "$query"');
+    final clean = sanitizeQuery(query);
+    _debugLog('Searching for: "$clean"');
+    if (clean.isEmpty) return const [];
     final results = await Future.wait([
-      _safe(() => _searchPubMed(query, maxPerSource)),
-      _safe(() => _searchWikipedia(query, maxPerSource)),
-      _safe(() => _searchDuckDuckGo(query, maxPerSource)),
+      _safe(() => _searchPubMed(clean, maxPerSource)),
+      _safe(() => _searchWikipedia(clean, 3)),
+      _safe(() => _searchDuckDuckGo(clean, maxPerSource)),
     ]);
 
     final merged = <WebSearchResult>[];
     final seenUrls = <String>{};
     for (final list in results) {
       for (final r in list) {
+        if (r.title.trim().isEmpty) continue;
         if (seenUrls.add(r.url)) {
           merged.add(r);
         }
@@ -165,41 +183,98 @@ class WebSearchService {
   Future<List<WebSearchResult>> _searchDuckDuckGo(String query, int max) async {
     _debugLog('DuckDuckGo: querying...');
     final encoded = Uri.encodeComponent(query);
-    final uri = Uri.parse('https://html.duckduckgo.com/html/?q=$encoded');
+    var results = await _ddgEndpoint(
+        'https://html.duckduckgo.com/html/?q=$encoded', max);
+    // The HTML endpoint occasionally serves an anti-bot / empty page —
+    // retry once against the lighter endpoint before giving up.
+    if (results.isEmpty) {
+      _debugLog('DuckDuckGo: html empty, trying lite endpoint...');
+      results = await _ddgEndpoint(
+          'https://lite.duckduckgo.com/lite/?q=$encoded', max);
+    }
+    _debugLog('DuckDuckGo: returning ${results.length} results');
+    return results;
+  }
+
+  Future<List<WebSearchResult>> _ddgEndpoint(String url, int max) async {
+    final uri = Uri.parse(url);
     final resp = await http.get(uri, headers: {
       'User-Agent':
           'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36',
     });
-    _debugLog('DuckDuckGo: status ${resp.statusCode}');
+    _debugLog('DuckDuckGo: ${uri.host} status ${resp.statusCode}');
     if (resp.statusCode != 200) return const [];
     final html = resp.body;
-    _debugLog('DuckDuckGo: HTML length ${html.length}');
 
     final out = <WebSearchResult>[];
+    // Primary layout: anchored title + snippet pairs.
     final resultPattern = RegExp(
-      r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?'
+      r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+      dotAll: true,
+    );
+    final snippetPattern = RegExp(
       r'<a[^>]*class="result__snippet"[^>]*>(.*?)</a>',
       dotAll: true,
     );
+    final snippets = snippetPattern.allMatches(html)
+        .map((m) => _stripHtml(m.group(1) ?? ''))
+        .toList();
+    var snippetIdx = 0;
     for (final match in resultPattern.allMatches(html)) {
       if (out.length >= max) break;
-      var url = match.group(1) ?? '';
-      final title = _stripHtml(match.group(2) ?? '');
-      final snippet = _stripHtml(match.group(3) ?? '');
-      if (url.contains('uddg=')) {
-        final uddg = Uri.splitQueryString(url.split('?').last)['uddg'];
-        if (uddg != null) url = uddg;
-      }
-      if (url.isEmpty || title.isEmpty) continue;
-      out.add(WebSearchResult(
-        title: title,
-        snippet: snippet,
-        url: url,
-        source: 'Web',
-      ));
+      final snippet =
+          snippetIdx < snippets.length ? snippets[snippetIdx] : '';
+      snippetIdx++;
+      final result = _ddgResultFrom(match.group(1) ?? '',
+          _stripHtml(match.group(2) ?? ''), snippet);
+      if (result != null) out.add(result);
     }
-    _debugLog('DuckDuckGo: returning ${out.length} results');
+    if (out.isNotEmpty) return out;
+
+    // Lite layout: plain <a rel="nofollow" href="...">Title</a> rows.
+    final litePattern = RegExp(
+      r'<a[^>]*href="(http[^"]+)"[^>]*class="result-link"[^>]*>(.*?)</a>',
+      dotAll: true,
+    );
+    for (final match in litePattern.allMatches(html)) {
+      if (out.length >= max) break;
+      final result = _ddgResultFrom(match.group(1) ?? '',
+          _stripHtml(match.group(2) ?? ''), '');
+      if (result != null) out.add(result);
+    }
+    if (out.isNotEmpty) return out;
+
+    // Last resort: any external http link that isn't DDG's own navigation.
+    final anyLink = RegExp(r'<a[^>]*href="(http[^"]+)"[^>]*>([^<]{15,120})</a>');
+    for (final match in anyLink.allMatches(html)) {
+      if (out.length >= max) break;
+      final url = match.group(1) ?? '';
+      if (url.contains('duckduckgo.com')) continue;
+      final result = _ddgResultFrom(url, _stripHtml(match.group(2) ?? ''), '');
+      if (result != null) out.add(result);
+    }
     return out;
+  }
+
+  WebSearchResult? _ddgResultFrom(
+      String rawUrl, String title, String snippet) {
+    var url = rawUrl;
+    if (url.contains('uddg=')) {
+      final uddg = Uri.splitQueryString(url.split('?').last)['uddg'];
+      if (uddg != null) url = uddg;
+    }
+    if (url.isEmpty ||
+        title.isEmpty ||
+        !url.startsWith('http') ||
+        url.contains('duckduckgo.com')) {
+      return null;
+    }
+    return WebSearchResult(
+      title: title,
+      snippet: snippet,
+      url: url,
+      source: 'Web',
+    );
   }
 
   String _stripHtml(String input) {

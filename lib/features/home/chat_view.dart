@@ -52,11 +52,20 @@ class _ChatViewState extends ConsumerState<ChatView> {
 
   void _scrollToBottom() {
     if (!_scrollController.hasClients) return;
-    _scrollController.animateTo(
-      _scrollController.position.maxScrollExtent,
-      duration: const Duration(milliseconds: 200),
-      curve: Curves.easeOut,
-    );
+    // Only auto-scroll when the user is already near the bottom — otherwise
+    // scrolling is yanked out from under them while reading earlier messages
+    // (and animateTo per token caused visible jank).
+    final position = _scrollController.position;
+    final distanceFromBottom =
+        position.maxScrollExtent - _scrollController.offset;
+    if (ref.read(chatControllerProvider).messages.length <= 2 ||
+        distanceFromBottom < 400) {
+      _scrollController.animateTo(
+        position.maxScrollExtent,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+      );
+    }
   }
 
   @override
@@ -172,6 +181,21 @@ class _ChatViewState extends ConsumerState<ChatView> {
   }
 
   void _send(String text) {
+    final state = ref.read(chatControllerProvider);
+    if (state.modelFile == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Set up a model first (drawer → Set up model).'),
+        ),
+      );
+      return;
+    }
+    if (state.modelLoading) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Still loading the model — one moment…')),
+      );
+      return;
+    }
     _inputController.clear();
     ref
         .read(chatControllerProvider.notifier)
@@ -264,6 +288,15 @@ class _PendingImageBar extends StatelessWidget {
               width: 52,
               height: 52,
               fit: BoxFit.cover,
+              errorBuilder: (_, _, _) => Container(
+                width: 52,
+                height: 52,
+                color: AppColors.sagePale,
+                child: const Icon(
+                  Icons.broken_image_outlined,
+                  color: AppColors.coffeeSoft,
+                ),
+              ),
             ),
           ),
           const SizedBox(width: 12),
@@ -440,6 +473,15 @@ class _UserContent extends StatelessWidget {
                 File(message.imagePath!),
                 width: 180,
                 fit: BoxFit.cover,
+                errorBuilder: (_, _, _) => Container(
+                  width: 180,
+                  height: 100,
+                  color: Colors.white.withValues(alpha: 0.2),
+                  child: const Icon(
+                    Icons.broken_image_outlined,
+                    color: Colors.white,
+                  ),
+                ),
               ),
             ),
           ),
@@ -623,12 +665,7 @@ class _SourceChip extends StatelessWidget {
       borderRadius: BorderRadius.circular(12),
       child: InkWell(
         borderRadius: BorderRadius.circular(12),
-        onTap: () async {
-          final uri = Uri.tryParse(source.url);
-          if (uri != null && await canLaunchUrl(uri)) {
-            await launchUrl(uri, mode: LaunchMode.externalApplication);
-          }
-        },
+        onTap: () => _openWebSource(context, source.url),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
           child: Row(
@@ -677,6 +714,39 @@ class _SourceChip extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Opens a source link in the device browser.
+///
+/// We deliberately DON'T pre-check with [canLaunchUrl]: on Android 11+ package
+/// visibility makes it return false for https unless the browser is declared in
+/// the manifest's queries element, which would make the tap do nothing.
+/// Launching the implicit VIEW intent still works, and any failure is reported
+/// instead of being silently swallowed.
+Future<void> _openWebSource(BuildContext context, String rawUrl) async {
+  final trimmed = rawUrl.trim();
+  Uri? uri = Uri.tryParse(trimmed);
+  if (uri != null && uri.scheme.isEmpty) {
+    uri = Uri.tryParse(Uri.decodeComponent(trimmed));
+  }
+  if (uri == null || !uri.scheme.startsWith('http')) {
+    if (context.mounted) _sourceToast(context, 'This link address looks invalid.');
+    return;
+  }
+  try {
+    final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!ok && context.mounted) {
+      _sourceToast(context, 'Couldn\'t open the link on this device.');
+    }
+  } catch (_) {
+    if (context.mounted) _sourceToast(context, 'Couldn\'t open the link on this device.');
+  }
+}
+
+void _sourceToast(BuildContext context, String message) {
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(content: Text(message), duration: const Duration(seconds: 4)),
+  );
 }
 
 class _TypingDots extends StatefulWidget {

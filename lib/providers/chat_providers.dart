@@ -8,6 +8,7 @@ import 'package:llama_flutter_android/llama_flutter_android.dart' as llama;
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
+import '../core/utils/friendly_error.dart';
 import '../data/models/chat_message.dart';
 import '../data/models/conversation.dart';
 import '../data/models/document_item.dart';
@@ -144,6 +145,11 @@ class _SearchDirectiveDetector {
 
 class ChatController extends Notifier<ChatState> {
   StreamSubscription<String>? _tokenSub;
+  Completer<void>? _activeCompleter;
+  bool _stopRequested = false;
+
+  static const int _maxHistoryMessages = 10;
+  static const int _maxOcrChars = 4000;
 
   @override
   ChatState build() {
@@ -169,8 +175,12 @@ class ChatController extends Notifier<ChatState> {
     } catch (e) {
       state = state.copyWith(
         modelLoading: false,
-        modelError: 'Could not load the model: $e',
+        modelError:
+            'This model couldn\'t be loaded. It may be damaged or too large '
+            'for this device — try re-downloading it, or pick the smaller '
+            'model in Settings.',
       );
+      debugLog('Model load failed: $e');
     }
   }
 
@@ -181,6 +191,11 @@ class ChatController extends Notifier<ChatState> {
       modelFile: file,
     );
     await _ensureModelLoaded(file);
+  }
+
+  Future<void> unloadActiveModel() async {
+    await AiEngine.instance.unload();
+    state = ChatState(conversation: state.conversation);
   }
 
   void newConversation() {
@@ -209,10 +224,41 @@ class ChatController extends Notifier<ChatState> {
   }
 
   Future<void> deleteConversation(String id) async {
+    if (state.conversation?.id == id && state.isGenerating) {
+      await stopGenerating();
+    }
+    final conversation = StorageService.instance.getConversation(id);
+    await _deleteMessageImages(conversation);
     await StorageService.instance.deleteConversation(id);
     if (state.conversation?.id == id) {
-      state = const ChatState();
-      await init();
+      final modelFile = state.modelFile;
+      state = ChatState(modelFile: modelFile);
+    }
+  }
+
+  Future<void> clearAllConversations() async {
+    if (state.isGenerating || state.isSearching) {
+      await stopGenerating();
+    }
+    for (final conversation in StorageService.instance.getConversations()) {
+      await _deleteMessageImages(conversation);
+    }
+    await StorageService.instance.clearAll();
+    final modelFile = state.modelFile;
+    state = ChatState(modelFile: modelFile);
+  }
+
+  Future<void> _deleteMessageImages(Conversation? conversation) async {
+    if (conversation == null) return;
+    for (final message in conversation.messages) {
+      final path = message.imagePath;
+      if (path == null) continue;
+      try {
+        final file = File(path);
+        if (await file.exists()) await file.delete();
+      } catch (_) {
+        // Best-effort cleanup.
+      }
     }
   }
 
@@ -242,17 +288,26 @@ class ChatController extends Notifier<ChatState> {
     } else {
       conversation.attachedDocIds.add(docId);
     }
-    await StorageService.instance.saveConversation(conversation);
+    // Only persist conversations that have real content; otherwise the
+    // history fills up with empty "New chat" entries.
+    if (conversation.messages.isNotEmpty) {
+      await StorageService.instance.saveConversation(conversation);
+    }
     state = state.copyWith(conversation: conversation);
   }
 
   Future<void> attachImage({required ImageSource source}) async {
     final picker = ImagePicker();
-    final picked = await picker.pickImage(
-      source: source,
-      imageQuality: 85,
-      maxWidth: 1600,
-    );
+    final XFile? picked;
+    try {
+      picked = await picker.pickImage(
+        source: source,
+        imageQuality: 85,
+        maxWidth: 1600,
+      );
+    } catch (_) {
+      return; // User denied permission or picker crashed.
+    }
     if (picked == null) return;
 
     final appDir = await getApplicationSupportDirectory();
@@ -260,9 +315,20 @@ class ChatController extends Notifier<ChatState> {
     if (!await imagesDir.exists()) {
       await imagesDir.create(recursive: true);
     }
-    final ext = picked.path.split('.').last.toLowerCase();
+    var ext = picked.path.split('.').last.toLowerCase();
+    if (ext.isEmpty || ext.length > 5 || !RegExp(r'^[a-z0-9]+$').hasMatch(ext)) {
+      ext = 'jpg';
+    }
     final target = File('${imagesDir.path}/${_uuid.v4()}.$ext');
-    await File(picked.path).copy(target.path);
+    try {
+      await File(picked.path).copy(target.path);
+    } catch (_) {
+      state = state.copyWith(
+        clearPendingImage: true,
+        ocrError: 'Could not load the selected image.',
+      );
+      return;
+    }
 
     state = state.copyWith(
       pendingImagePath: target.path,
@@ -272,7 +338,10 @@ class ChatController extends Notifier<ChatState> {
     );
 
     try {
-      final text = await OcrService.instance.recognizeText(target.path);
+      var text = await OcrService.instance.recognizeText(target.path);
+      if (text.length > _maxOcrChars) {
+        text = '${text.substring(0, _maxOcrChars)}…';
+      }
       state = state.copyWith(
         ocrLoading: false,
         pendingOcrText: text.isEmpty ? null : text,
@@ -280,8 +349,10 @@ class ChatController extends Notifier<ChatState> {
     } catch (e) {
       state = state.copyWith(
         ocrLoading: false,
-        ocrError: 'Could not read text from the image: $e',
+        ocrError: 'Couldn\'t read text from this image — you can still send '
+            'it, or try a clearer, well-lit photo.',
       );
+      debugLog('OCR failed: $e');
     }
   }
 
@@ -314,6 +385,9 @@ class ChatController extends Notifier<ChatState> {
       'this year',
       'breaking',
       'state of the art',
+      'upcoming',
+      'when is the next',
+      'announcement',
     ];
     if (triggers.any(lower.contains)) return true;
     final year = DateTime.now().year;
@@ -323,6 +397,7 @@ class ChatController extends Notifier<ChatState> {
   Future<void> sendMessage(String text, {bool webSearch = false}) async {
     final trimmed = text.trim();
     if (trimmed.isEmpty || state.isGenerating || state.isSearching) return;
+    _stopRequested = false;
 
     final engine = AiEngine.instance;
     if (!engine.isReady) {
@@ -358,7 +433,12 @@ class ChatController extends Notifier<ChatState> {
           trimmed.length > 34 ? '${trimmed.substring(0, 34)}…' : trimmed;
     }
     conversation.updatedAt = DateTime.now();
+    // Persist the user's message immediately so it survives an app kill
+    // mid-generation.
+    _save(conversation);
 
+    final imagePath = state.pendingImagePath;
+    final ocrText = state.pendingOcrText;
     final assistantMessage = ChatMessage(
       id: _uuid.v4(),
       role: 'assistant',
@@ -366,9 +446,6 @@ class ChatController extends Notifier<ChatState> {
       timestamp: DateTime.now(),
     );
     conversation.messages.add(assistantMessage);
-
-    final imagePath = state.pendingImagePath;
-    final ocrText = state.pendingOcrText;
     state = state.copyWith(
       conversation: conversation,
       isGenerating: true,
@@ -392,7 +469,17 @@ class ChatController extends Notifier<ChatState> {
       hasImage: imagePath != null,
       searchResults: searchResults,
       allowSearchIntercept: searchResults == null || searchResults.isEmpty,
+      webSearchWasRequested: webSearch,
     );
+  }
+
+  /// Removes empty assistant bubbles (e.g. after a stop or a crash) and
+  /// persists the conversation.
+  void _save(Conversation conversation) {
+    conversation.messages
+        .removeWhere((m) => m.isAssistant && m.content.isEmpty);
+    conversation.updatedAt = DateTime.now();
+    StorageService.instance.saveConversation(conversation);
   }
 
   Future<void> _generate({
@@ -403,20 +490,21 @@ class ChatController extends Notifier<ChatState> {
     bool hasImage = false,
     List<WebSearchResult>? searchResults,
     required bool allowSearchIntercept,
+    bool webSearchWasRequested = false,
   }) async {
     final engine = AiEngine.instance;
 
-    // DEBUG: Log attached document IDs
     if (conversation.attachedDocIds.isNotEmpty) {
-      debugLog('📎 ${conversation.attachedDocIds.length} document(s) attached: ${conversation.attachedDocIds.join(", ")}');
+      debugLog(
+        '📎 ${conversation.attachedDocIds.length} document(s) attached: '
+        '${conversation.attachedDocIds.join(", ")}',
+      );
     }
 
     final ragContext = KnowledgeService.instance.buildContext(
       userText,
       attachedDocIds: conversation.attachedDocIds,
     );
-    
-    // Show context length in debug mode
     debugLog('RAG context generated: ${ragContext.length} chars');
 
     final systemBuffer = StringBuffer(kMedicalSystemPrompt);
@@ -445,11 +533,34 @@ class ChatController extends Notifier<ChatState> {
       systemBuffer.writeln(
         WebSearchService.instance.buildContext(searchResults),
       );
+      // Critical: the base prompt tells the model to emit [SEARCH:] when it
+      // lacks current info. Now that results are already attached, that
+      // instruction must be overridden — otherwise the model prints the raw
+      // directive into the chat instead of answering.
+      systemBuffer.writeln();
+      systemBuffer.writeln(
+        'Live web results are provided above. Answer using them now: do NOT '
+        'reply with [SEARCH:] again, do not mention being unable to search, '
+        'and cite sources by their numbers where you use them.',
+      );
+    } else if (webSearchWasRequested) {
+      // The user explicitly asked for web search but it came back empty —
+      // say so honestly instead of pretending.
+      systemBuffer.writeln();
+      systemBuffer.writeln(
+        'Note: a live web search was attempted for this question but returned '
+        'no usable results. Answer from your own knowledge, and briefly tell '
+        'the student you could not verify this online.',
+      );
     }
 
-    final history = conversation.messages
+    // Cap history so long chats cannot overflow the model's context window.
+    final past = conversation.messages
         .where((m) => m.id != assistantMessage.id && m.content.isNotEmpty)
         .toList();
+    final history = past.length > _maxHistoryMessages
+        ? past.sublist(past.length - _maxHistoryMessages)
+        : past;
 
     final llamaMessages = <llama.ChatMessage>[
       llama.ChatMessage(role: 'system', content: systemBuffer.toString()),
@@ -462,38 +573,64 @@ class ChatController extends Notifier<ChatState> {
         ),
     ];
 
+    // The detector ALWAYS watches for the [SEARCH:] directive — small models
+    // emit it even when they've been told not to. What differs is what we do
+    // with it:
+    //  • intercept allowed  → capture it and run a real search.
+    //  • intercept disabled → silently swallow the directive text and keep
+    //    streaming the rest of the reply (it must never reach the chat).
     final detector = _SearchDirectiveDetector();
-    var flushed = false;
+    var buffering = true; // Feeding the detector; tokens held temporarily.
+    var captured = false; // Directive fully seen; drop remaining tokens.
+
+    void appendToken(String token) {
+      assistantMessage.content += token;
+      if (state.conversation?.id == conversation.id) {
+        state = state.copyWith(conversation: conversation);
+      }
+    }
 
     try {
       final stream = engine.chat(messages: llamaMessages);
       final completer = Completer<void>();
+      _activeCompleter = completer;
       _tokenSub = stream.listen(
         (token) {
-          if (flushed) {
-            assistantMessage.content += token;
-            state = state.copyWith(conversation: conversation);
+          if (!buffering) {
+            if (!captured) appendToken(token);
             return;
           }
           detector.add(token);
           if (detector.isFailed) {
+            // Normal answer text — flush what we held and stream directly.
             assistantMessage.content += detector.buffered;
-            flushed = true;
-            state = state.copyWith(conversation: conversation);
+            buffering = false;
+            if (state.conversation?.id == conversation.id) {
+              state = state.copyWith(conversation: conversation);
+            }
+          } else if (detector.isComplete) {
+            if (allowSearchIntercept) {
+              captured = true; // Hold nothing more; intercept after stream.
+            } else {
+              buffering = false; // Drop the directive, keep the rest.
+            }
           }
         },
         onError: (Object e) {
-          if (assistantMessage.content.isEmpty && !detector.isComplete) {
-            assistantMessage.content =
-                'Something went wrong while generating. Please try again.';
+          if (assistantMessage.content.isEmpty) {
+            assistantMessage.content = friendlyError(e);
             assistantMessage.isError = true;
           }
-          _finalize(conversation);
-          state = state.copyWith(conversation: conversation, isGenerating: false);
+          _save(conversation);
+          if (state.conversation?.id == conversation.id) {
+            state = state.copyWith(conversation: conversation, isGenerating: false);
+          }
           if (!completer.isCompleted) completer.complete();
         },
         onDone: () {
-          if (!flushed && !detector.isComplete) {
+          if (buffering) {
+            // Stream ended mid-buffer (short reply, or a truncated
+            // directive) — show what we held as plain text.
             assistantMessage.content += detector.buffered;
           }
           if (!completer.isCompleted) completer.complete();
@@ -501,18 +638,38 @@ class ChatController extends Notifier<ChatState> {
         cancelOnError: true,
       );
       await completer.future;
+      if (identical(_activeCompleter, completer)) {
+        _activeCompleter = null;
+        _tokenSub = null;
+      }
     } catch (e) {
-      assistantMessage.content = 'Could not start generation: $e';
+      assistantMessage.content = friendlyError(e);
       assistantMessage.isError = true;
+      _save(conversation);
       state = state.copyWith(conversation: conversation, isGenerating: false);
       return;
     }
 
-    if (!flushed && detector.isComplete && allowSearchIntercept) {
-      final query = detector.query!;
+    // If the user stopped generation, don't run a deferred web search or keep
+    // streaming — just persist what we have (empty bubbles get stripped later).
+    if (_stopRequested) {
+      assistantMessage.content = assistantMessage.content
+          .replaceAll(RegExp(r'\[\s*SEARCH\s*:[^\]]*\]'), '')
+          .trim();
+      _save(conversation);
+      if (state.conversation?.id == conversation.id) {
+        state = state.copyWith(conversation: conversation, isGenerating: false);
+      }
+      return;
+    }
+
+    if (captured && allowSearchIntercept) {
+      final query = WebSearchService.instance.sanitizeQuery(detector.query ?? '');
       assistantMessage.content = '';
       state = state.copyWith(isSearching: true, isGenerating: false);
-      final results = await WebSearchService.instance.search(query);
+      final results = query.isEmpty
+          ? const <WebSearchResult>[]
+          : await WebSearchService.instance.search(query);
       state = state.copyWith(isSearching: false, isGenerating: true);
       if (results.isNotEmpty) {
         await _generate(
@@ -523,13 +680,23 @@ class ChatController extends Notifier<ChatState> {
           hasImage: hasImage,
           searchResults: results,
           allowSearchIntercept: false,
+          webSearchWasRequested: webSearchWasRequested,
         );
         return;
       }
       assistantMessage.content =
-          'I tried to search the web for "$query" but got no results. '
-          'Please try rephrasing your question.';
-      assistantMessage.isError = true;
+          'I couldn\'t find anything useful online for that. Try rephrasing, '
+          'or ask me about it and I\'ll answer from what I know.';
+      assistantMessage.isError = false;
+    }
+
+    // Belt and braces: no [SEARCH:] directive should ever survive into a
+    // saved/displayed message.
+    final cleaned = assistantMessage.content
+        .replaceAll(RegExp(r'\[\s*SEARCH\s*:[^\]]*\]'), '')
+        .trim();
+    if (cleaned != assistantMessage.content) {
+      assistantMessage.content = cleaned;
     }
 
     if (searchResults != null && searchResults.isNotEmpty) {
@@ -545,23 +712,29 @@ class ChatController extends Notifier<ChatState> {
       assistantMessage.webSearched = true;
     }
 
-    _finalize(conversation);
+    if (assistantMessage.content.isEmpty) {
+      assistantMessage.content =
+          'The model returned an empty response. Please try again.';
+      assistantMessage.isError = true;
+    }
+    _save(conversation);
     state = state.copyWith(conversation: conversation, isGenerating: false);
   }
 
-  void _finalize(Conversation conversation) {
-    conversation.updatedAt = DateTime.now();
-    StorageService.instance.saveConversation(conversation);
-  }
-
   Future<void> stopGenerating() async {
+    _stopRequested = true;
     await AiEngine.instance.stop();
     await _tokenSub?.cancel();
     _tokenSub = null;
+    final completer = _activeCompleter;
+    _activeCompleter = null;
+    if (completer != null && !completer.isCompleted) {
+      completer.complete();
+    }
     final conversation = state.conversation;
     if (conversation != null) {
-      conversation.updatedAt = DateTime.now();
-      await StorageService.instance.saveConversation(conversation);
+      _save(conversation);
+      state = state.copyWith(conversation: conversation);
     }
     state = state.copyWith(isGenerating: false, isSearching: false);
   }
@@ -570,8 +743,13 @@ class ChatController extends Notifier<ChatState> {
 final chatControllerProvider =
     NotifierProvider<ChatController, ChatState>(ChatController.new);
 
+/// Rebuilds only when a conversation is created/saved (its [updatedAt]
+/// changes) — not on every streamed token, which previously re-read the
+/// entire Hive box dozens of times per second.
 final conversationsProvider = Provider<List<Conversation>>((ref) {
-  ref.watch(chatControllerProvider);
+  ref.watch(
+    chatControllerProvider.select((s) => s.conversation?.updatedAt),
+  );
   return StorageService.instance.getConversations();
 });
 

@@ -33,10 +33,11 @@ class ConversationAdapter extends TypeAdapter<Conversation> {
     };
     return Conversation(
       id: fields[0] as String,
-      title: fields[1] as String,
+      title: (fields[1] as String?) ?? 'Chat',
       createdAt: fields[2] as DateTime,
       updatedAt: fields[3] as DateTime,
-      messages: (fields[4] as List).cast<ChatMessage>(),
+      // Defensive casts keep old/partial boxes from crashing on read.
+      messages: (fields[4] as List?)?.cast<ChatMessage>() ?? [],
       attachedDocIds: (fields[5] as List?)?.cast<String>() ?? [],
     );
   }

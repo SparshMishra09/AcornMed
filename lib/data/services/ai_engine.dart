@@ -34,6 +34,18 @@ class AiEngine {
   EngineStatus status = EngineStatus.idle;
   String? lastError;
   String? loadedModelPath;
+  llama.GpuInfo? _gpuInfo;
+
+  /// Cached device GPU/RAM probe. Used to pick GPU-offload layers so models
+  /// run as fast as the hardware allows.
+  Future<llama.GpuInfo> get _gpu async {
+    if (_gpuInfo == null) {
+      final probe = llama.LlamaController();
+      _gpuInfo = await probe.detectGpu();
+      await probe.dispose();
+    }
+    return _gpuInfo!;
+  }
 
   final _statusController = StreamController<EngineStatus>.broadcast();
   Stream<EngineStatus> get statusStream => _statusController.stream;
@@ -52,6 +64,9 @@ class AiEngine {
     int? gpuLayers,
   }) async {
     if (status == EngineStatus.loading) return;
+    // When no layer count is supplied, let the device decide how much of the
+    // model to offload to the GPU — this is the single biggest speed lever.
+    gpuLayers ??= (await _gpu).recommendedGpuLayers;
     _setStatus(EngineStatus.loading);
     lastError = null;
     try {
@@ -99,15 +114,23 @@ class AiEngine {
       minP: 0.05,
       repeatPenalty: 1.1,
     );
-    final relay = StreamController<String>();
-    stream.listen(
+    late final StreamSubscription<String> upstreamSub;
+    final relay = StreamController<String>(
+      onCancel: () {
+        // When the UI detaches (e.g. stop), kill the upstream subscription
+        // too — otherwise the model keeps streaming tokens into an
+        // orphaned controller and leaks memory until generation finishes.
+        upstreamSub.cancel();
+      },
+    );
+    upstreamSub = stream.listen(
       relay.add,
       onError: relay.addError,
       onDone: () {
         if (status == EngineStatus.generating) {
           _setStatus(EngineStatus.ready);
         }
-        relay.close();
+        if (!relay.isClosed) relay.close();
       },
     );
     return relay.stream;

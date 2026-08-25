@@ -110,13 +110,9 @@ Downloading a model in-app is now production-safe:
 
 ## 📱 Screenshots
 
-| Onboarding | Home | Documents |
-|------------|------|-----------|
-| ![Onboarding](docs/screenshots/onboarding-1.png) | ![Home](docs/screenshots/home-no-model.png) | ![Documents](docs/screenshots/documents.png) |
-
-| Onboarding (Privacy) | Onboarding (Knowledge) | Navigation Drawer |
-|----------------------|------------------------|-------------------|
-| ![Onboarding 2](docs/screenshots/onboarding-2.png) | ![Onboarding 3](docs/screenshots/onboarding-3.png) | ![Drawer](docs/screenshots/drawer.png) |
+| Chat | Model Setup | Navigation Drawer | Image OCR |
+|------|-------------|-------------------|-----------|
+| ![Chat](docs/screenshots/chat-response.png) | ![Model Setup](docs/screenshots/model-setup.png) | ![Drawer](docs/screenshots/drawer-history.png) | ![Image Input](docs/screenshots/image-input.png) |
 
 ---
 
@@ -236,6 +232,22 @@ You have two options:
 4. The app loads the model (first load ~10–30s depending on device).
 
 > **Tip**: Place a model in `Android/data/com.acornmed.acorn_med/files/` for quick access.
+
+### Available Models
+
+All models are **text-only** — none natively process images. When you attach an image, the app runs on-device OCR (ML Kit) to extract text, then sends that text to the model.
+
+| Model | Size | Quality | Tool Use | Vision | Notes |
+|-------|------|---------|----------|--------|-------|
+| **SmolLM2 1.7B** | 1.0 GB | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | Text only | Tiny and fast — best for older/low-RAM phones |
+| **Qwen2.5 1.5B** | 0.9 GB | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | Text only | Light and fast, comfortable on most phones |
+| **Llama 3.2 3B** | 1.9 GB | ⭐⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐⭐⭐ | Text only | Meta's compact model, well-rounded for study |
+| **Qwen2.5 3B** | 1.8 GB | ⭐⭐⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐⭐⭐⭐ | Text only | Best balance — recommended for most devices |
+| **Gemma 3 4B** | 2.4 GB | ⭐⭐⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐⭐⭐ | Text only | Strong factual recall, good for definitions |
+| **Phi-4 mini 3.8B** | 2.4 GB | ⭐⭐⭐⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐⭐⭐⭐⭐ | Text only | Excellent reasoning, step-by-step explanations |
+| **Qwen2.5 7B** | 4.6 GB | ⭐⭐⭐⭐⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐⭐⭐⭐ | Text only | Smartest option — needs ~5 GB RAM |
+
+> **Image support**: The app extracts text from images via OCR and sends it to the model. For images with no readable text (e.g., photos, diagrams), the model will honestly tell you it cannot see the image directly.
 
 ---
 

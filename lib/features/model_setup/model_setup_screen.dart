@@ -457,6 +457,43 @@ class _ModelCard extends StatelessWidget {
               color: AppColors.coffee.withValues(alpha: 0.65),
             ),
           ),
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            decoration: BoxDecoration(
+              color: option.supportsVision
+                  ? AppColors.sageLight
+                  : AppColors.coffee.withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  option.supportsVision
+                      ? Icons.photo_camera_rounded
+                      : Icons.text_fields_rounded,
+                  size: 13,
+                  color: option.supportsVision
+                      ? AppColors.sageDark
+                      : AppColors.coffeeSoft,
+                ),
+                const SizedBox(width: 5),
+                Text(
+                  option.supportsVision
+                      ? 'Supports images'
+                      : 'Text only — images via OCR',
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                    color: option.supportsVision
+                        ? AppColors.sageDark
+                        : AppColors.coffeeSoft,
+                  ),
+                ),
+              ],
+            ),
+          ),
           if (recommended && fit != null) ...[
             const SizedBox(height: 12),
             _PillarMeter(

@@ -18,6 +18,9 @@ class ModelOption {
     /// 1–10: reliability at the app's "tool use" — following the [SEARCH:]
     /// directive, grounding on web/RAG context, and staying on-task.
     required this.toolCalling,
+    /// Whether this model can natively process images (vision).
+    /// All current catalog models are text-only; images are handled via OCR.
+    this.supportsVision = false,
     /// Optional SHA-256 (hex) of the model file. When provided, the download
     /// is verified against it so a truncated or corrupted file is never
     /// presented to the engine as a complete model.
@@ -32,6 +35,7 @@ class ModelOption {
   final int sizeBytes;
   final int quality;
   final int toolCalling;
+  final bool supportsVision;
   final String? sha256;
 
   String get sizeLabel =>

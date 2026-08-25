@@ -39,6 +39,17 @@
 | 🔍 Outdated knowledge | **Optional live web search** (PubMed, Wikipedia, Web) |
 | 📸 Image-only materials | **On-device OCR** (ML Kit, no cloud) |
 
+<p align="center">
+  <a href="https://github.com/SparshMishra09/AcornMed/releases/latest">
+    <img alt="Download AcornMed" src="https://img.shields.io/badge/📥_Download_AcornMed_v1.2.0-blue?style=for-the-badge&logo=android">
+  </a>
+</p>
+
+<p align="center">
+  <strong>Recommended:</strong> <a href="https://github.com/SparshMishra09/AcornMed/releases/download/v1.2.0/AcornMed-v1.2.0-arm64-v8a.apk">arm64-v8a (21.8 MB)</a> — for modern phones<br>
+  <strong>All ABIs:</strong> <a href="https://github.com/SparshMishra09/AcornMed/releases/download/v1.2.0/AcornMed-v1.2.0-universal.apk">Universal (45.8 MB)</a> — if unsure or older/32-bit device
+</p>
+
 ---
 
 ## ✨ Features
@@ -99,13 +110,13 @@ Downloading a model in-app is now production-safe:
 
 ## 📱 Screenshots
 
-| Onboarding | Home (set up model) | Model Setup | Documents |
-|------------|--------------------|-------------|-----------|
-| ![Onboarding 1](docs/screenshots/onboarding-1.png) | ![Home](docs/screenshots/home-no-model.png) | ![Model Setup](docs/screenshots/model-setup.png) | ![Documents](docs/screenshots/documents.png) |
+| Onboarding | Home | Documents |
+|------------|------|-----------|
+| ![Onboarding](docs/screenshots/onboarding-1.png) | ![Home](docs/screenshots/home-no-model.png) | ![Documents](docs/screenshots/documents.png) |
 
-| Navigation Drawer | Settings (Faster mode) | Onboarding 2 | Onboarding 3 |
-|-------------------|------------------------|--------------|--------------|
-| ![Drawer](docs/screenshots/drawer.png) | ![Settings](docs/screenshots/settings.png) | ![Onboarding 2](docs/screenshots/onboarding-2.png) | ![Onboarding 3](docs/screenshots/onboarding-3.png) |
+| Onboarding (Privacy) | Onboarding (Knowledge) | Navigation Drawer |
+|----------------------|------------------------|-------------------|
+| ![Onboarding 2](docs/screenshots/onboarding-2.png) | ![Onboarding 3](docs/screenshots/onboarding-3.png) | ![Drawer](docs/screenshots/drawer.png) |
 
 ---
 
@@ -177,13 +188,10 @@ User Query
 - **Java 17** (for Gradle)
 - **Device/emulator** with Android 8.0+ (API 26)
 
-### Install (recommended) — get the release APK
-1. Go to **[Releases](https://github.com/SparshMishra09/AcornMed/releases)**.
-2. Download the APK that matches your device:
-   - **`AcornMed-v1.2.0-arm64-v8a.apk`** — recommended for virtually all modern phones (ARM64)
-   - **`AcornMed-v1.2.0-universal.apk`** — includes all ABIs; use if unsure or on older/32-bit devices
-3. Transfer to your phone and open it (allow install from unknown sources if prompted).
-4. On first launch, follow onboarding, then **Set up model** (download or import a GGUF).
+### Install
+Download the APK from the [**Download**](https://github.com/SparshMishra09/AcornMed/releases) section above (or from [Releases](https://github.com/SparshMishra09/AcornMed/releases)):
+1. Transfer to your phone and open it (allow install from unknown sources if prompted).
+2. On first launch, follow onboarding, then **Set up model** (download or import a GGUF).
 
 ### Build from source
 ```bash

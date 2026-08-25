@@ -114,6 +114,10 @@ Downloading a model in-app is now production-safe:
 |------|-------------|-------------------|-----------|
 | ![Chat](docs/screenshots/chat-response.png) | ![Model Setup](docs/screenshots/model-setup.png) | ![Drawer](docs/screenshots/drawer-history.png) | ![Image Input](docs/screenshots/image-input.png) |
 
+| Onboarding | Documents | First Launch |
+|------------|-----------|--------------|
+| ![Onboarding](docs/screenshots/onboarding-1.png) | ![Documents](docs/screenshots/documents.png) | ![Home](docs/screenshots/home-no-model.png) |
+
 ---
 
 ## 🏗️ Architecture

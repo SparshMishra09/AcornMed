@@ -2,15 +2,47 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/app_theme.dart';
+import '../../core/utils/performance_mode.dart';
 import '../../data/services/knowledge_service.dart';
 import '../../providers/chat_providers.dart';
 import '../model_setup/model_setup_screen.dart';
 
-class SettingsScreen extends ConsumerWidget {
+class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends ConsumerState<SettingsScreen> {
+  bool _fast = false;
+
+  @override
+  void initState() {
+    super.initState();
+    loadFastMode().then((v) {
+      if (mounted) setState(() => _fast = v);
+    });
+  }
+
+  Future<void> _toggleFast(bool value) async {
+    await setFastMode(value);
+    if (mounted) setState(() => _fast = value);
+    final ctrl = ref.read(chatControllerProvider.notifier);
+    final file = ref.read(chatControllerProvider).modelFile;
+    if (file != null) {
+      // The new context size only takes effect after a reload.
+      await ctrl.setModelFile(file);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Reloading model with new speed profile')),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final state = ref.watch(chatControllerProvider);
     final knowledge = KnowledgeService.instance;
     final modelName = state.modelFile != null
@@ -43,6 +75,20 @@ class SettingsScreen extends ConsumerWidget {
                     ),
                   );
                 },
+              ),
+              const Divider(height: 1, indent: 16, endIndent: 16),
+              SwitchListTile(
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+                secondary: const Icon(Icons.bolt_rounded),
+                title: const Text('Faster responses'),
+                subtitle: const Text(
+                  'Uses a smaller context and shorter replies. Replies start '
+                  'sooner and stream faster, with slightly less detail and a '
+                  'smaller memory footprint.',
+                  style: TextStyle(fontSize: 12.5, height: 1.4),
+                ),
+                value: _fast,
+                onChanged: _toggleFast,
               ),
             ],
           ),

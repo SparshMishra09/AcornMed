@@ -41,6 +41,15 @@ String friendlyError(Object error) {
         'Check the app settings.';
   }
 
+  if (s.contains('checksum') || s.contains('integrity')) {
+    return 'The downloaded file failed its integrity check. '
+        'Tap Download to try again.';
+  }
+  if (s.contains('incomplete')) {
+    return 'The download didn\'t finish completely. '
+        'Tap Download to try again.';
+  }
+
   if (kDebugMode) {
     debugPrint('[FriendlyError] Unmapped error: $error');
   }

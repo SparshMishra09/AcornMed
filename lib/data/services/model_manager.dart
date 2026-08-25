@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
@@ -17,6 +18,10 @@ class ModelOption {
     /// 1–10: reliability at the app's "tool use" — following the [SEARCH:]
     /// directive, grounding on web/RAG context, and staying on-task.
     required this.toolCalling,
+    /// Optional SHA-256 (hex) of the model file. When provided, the download
+    /// is verified against it so a truncated or corrupted file is never
+    /// presented to the engine as a complete model.
+    this.sha256,
   });
 
   final String id;
@@ -27,6 +32,7 @@ class ModelOption {
   final int sizeBytes;
   final int quality;
   final int toolCalling;
+  final String? sha256;
 
   String get sizeLabel =>
       '${(sizeBytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
@@ -232,10 +238,7 @@ class ModelManager {
     final target = File('${dir.path}/${option.fileName}');
     final partial = File('${target.path}.part');
 
-    var startByte = 0;
-    if (await partial.exists()) {
-      startByte = await partial.length();
-    }
+    // A complete file already on disk — nothing to do.
     if (await target.exists()) {
       final len = await target.length();
       if (len >= option.sizeBytes) {
@@ -246,66 +249,124 @@ class ModelManager {
         );
         return;
       }
+      // Stale/short target: remove so we re-download cleanly.
+      try {
+        await target.delete();
+      } catch (_) {}
     }
 
     _cancelling = false;
-    _client = http.Client();
-    final request = http.Request('GET', Uri.parse(option.url));
-    if (startByte > 0) {
-      request.headers['Range'] = 'bytes=$startByte-';
-    }
-
-    final response = await _client!.send(request);
-    if (response.statusCode != 200 && response.statusCode != 206) {
-      throw Exception('Download failed (HTTP ${response.statusCode})');
-    }
-
-    final totalBytes = response.statusCode == 206
-        ? startByte + (response.contentLength ?? 0)
-        : (response.contentLength ?? option.sizeBytes);
-
-    var received = startByte;
-    final sink = partial.openWrite(mode: FileMode.append);
-    var sinkClosed = false;
-
-    try {
-      await for (final chunk in response.stream) {
-        if (_cancelling) {
-          throw const _DownloadCancelled();
+    const maxAttempts = 3;
+    for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        final client = http.Client();
+        _client = client;
+        var startByte = 0;
+        if (await partial.exists()) {
+          startByte = await partial.length();
         }
-        sink.add(chunk);
-        received += chunk.length;
+
+        final request = http.Request('GET', Uri.parse(option.url));
+        if (startByte > 0) {
+          request.headers['Range'] = 'bytes=$startByte-';
+        }
+
+        final response = await client.send(request);
+        if (response.statusCode != 200 && response.statusCode != 206) {
+          throw Exception('Download failed (HTTP ${response.statusCode})');
+        }
+
+        // statusCode 206 means the server honoured our Range request and is
+        // sending the remaining bytes — append to the partial. A 200 means it
+        // ignored Range (or this is a fresh download) — start over so we don't
+        // append a full body onto an existing partial and double-count bytes.
+        final resuming = response.statusCode == 206;
+        if (!resuming && startByte > 0) {
+          startByte = 0;
+          if (await partial.exists()) await partial.delete();
+        }
+
+        // The declared model size is the source of truth for both the progress
+        // bar and the final integrity check, so a resumed download still lands
+        // on the correct total.
+        final totalBytes = option.sizeBytes;
+
+        var received = startByte;
+        final sink = partial.openWrite(
+          mode: resuming ? FileMode.append : FileMode.write,
+        );
+        var sinkClosed = false;
+
+        try {
+          await for (final chunk in response.stream) {
+            if (_cancelling) {
+              throw const _DownloadCancelled();
+            }
+            sink.add(chunk);
+            received += chunk.length;
+            yield DownloadProgress(
+              receivedBytes: received,
+              totalBytes: totalBytes,
+              isDone: false,
+            );
+          }
+          await sink.flush();
+          await sink.close();
+          sinkClosed = true;
+        } catch (e) {
+          if (!sinkClosed) {
+            try {
+              await sink.close();
+            } catch (_) {}
+          }
+          rethrow;
+        }
+
+        // Integrity gate: never present a short or corrupt file to the engine.
+        final got = await partial.length();
+        if (got != totalBytes) {
+          await partial.delete();
+          throw Exception(
+            'Download incomplete: received $got of $totalBytes bytes',
+          );
+        }
+        if (option.sha256 != null) {
+          final actual = await _sha256OfFile(partial);
+          if (actual != option.sha256!.toLowerCase()) {
+            await partial.delete();
+            throw Exception('Download checksum mismatch');
+          }
+        }
+
+        await partial.rename(target.path);
         yield DownloadProgress(
           receivedBytes: received,
           totalBytes: totalBytes,
-          isDone: false,
+          isDone: true,
         );
-      }
-      await sink.flush();
-      await sink.close();
-      sinkClosed = true;
-      await partial.rename(target.path);
-      yield DownloadProgress(
-        receivedBytes: received,
-        totalBytes: totalBytes,
-        isDone: true,
-      );
-    } catch (e) {
-      if (!sinkClosed) {
-        try {
-          await sink.close();
-        } catch (_) {}
-      }
-      // A user-initiated cancel surfaces as a client-closed error — treat
-      // any failure while cancelling as a silent stop, not an error.
-      if (e is _DownloadCancelled || _cancelling) {
+        return; // success
+      } on _DownloadCancelled {
+        // User cancelled — stop silently and leave the partial for resume.
         return;
+      } catch (e) {
+        if (_cancelling) return;
+        if (attempt == maxAttempts) rethrow;
+        // Transient failure — wait briefly and retry.
+        await Future.delayed(const Duration(seconds: 1));
+      } finally {
+        _client?.close();
+        _client = null;
       }
-      rethrow;
-    } finally {
-      _client?.close();
-      _client = null;
     }
+  }
+
+  /// Computes the lowercase hex SHA-256 of [file] in streaming chunks so large
+  /// model files don't have to be read fully into memory.
+  Future<String> _sha256OfFile(File file) async {
+    final digest = await file.openRead().transform(crypto.sha256).first;
+    return digest.bytes
+        .map((b) => b.toRadixString(16).padLeft(2, '0'))
+        .join();
   }
 
   void cancelDownload() {

@@ -36,6 +36,12 @@ class AiEngine {
   String? loadedModelPath;
   llama.GpuInfo? _gpuInfo;
 
+  /// Tunable inference settings. `contextSize` and `maxTokens` are lowered by
+  /// the "Faster responses" mode in Settings; `threads` is derived from the
+  /// CPU at load time.
+  int contextSize = 4096;
+  int maxTokens = 1024;
+
   /// Cached device GPU/RAM probe. Used to pick GPU-offload layers so models
   /// run as fast as the hardware allows.
   Future<llama.GpuInfo> get _gpu async {
@@ -57,13 +63,24 @@ class AiEngine {
 
   bool get isReady => status == EngineStatus.ready;
 
+  /// Number of CPU threads to use for generation. Most phones ship 6–8 cores,
+  /// so the previous hard-coded 4 left decode speed on the table. We use all
+  /// available cores but cap at 8 to avoid scheduling overhead on many-core
+  /// devices.
+  int _defaultThreads() {
+    final cores = Platform.numberOfProcessors;
+    return cores.clamp(4, 8);
+  }
+
   Future<void> loadModel(
     File modelFile, {
-    int threads = 4,
-    int contextSize = 4096,
+    int? threads,
+    int? contextSize,
     int? gpuLayers,
   }) async {
     if (status == EngineStatus.loading) return;
+    threads ??= _defaultThreads();
+    contextSize ??= this.contextSize;
     // When no layer count is supplied, let the device decide how much of the
     // model to offload to the GPU — this is the single biggest speed lever.
     gpuLayers ??= (await _gpu).recommendedGpuLayers;
@@ -97,17 +114,18 @@ class AiEngine {
 
   Stream<String> chat({
     required List<llama.ChatMessage> messages,
-    int maxTokens = 1024,
+    int? maxTokens,
     double temperature = 0.5,
   }) {
     final controller = _controller;
     if (controller == null || status != EngineStatus.ready) {
       throw StateError('Model is not loaded');
     }
+    final effectiveMax = maxTokens ?? this.maxTokens;
     _setStatus(EngineStatus.generating);
     final stream = controller.generateChat(
       messages: messages,
-      maxTokens: maxTokens,
+      maxTokens: effectiveMax,
       temperature: temperature,
       topP: 0.9,
       topK: 40,
@@ -124,7 +142,9 @@ class AiEngine {
       },
     );
     upstreamSub = stream.listen(
-      relay.add,
+      (chunk) {
+        relay.add(chunk);
+      },
       onError: relay.addError,
       onDone: () {
         if (status == EngineStatus.generating) {

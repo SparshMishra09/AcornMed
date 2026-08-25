@@ -44,6 +44,11 @@ class KnowledgeService {
   final Set<String> _indexedDocIds = {};
   bool _ready = false;
 
+  /// Caps on injected RAG text. Lowered by "Faster responses" mode to shrink
+  /// the prompt, which speeds up both prefill (time-to-first-token) and decode.
+  int maxContextChars = 6000;
+  int maxDocContextChars = 6000;
+
   bool get isReady => _ready;
   int get chunkCount => _chunks.length;
   int get bundledChunkCount =>
@@ -322,7 +327,7 @@ class KnowledgeService {
       debugLog('Found ${docHits.length} matching passages from user documents');
 
       // Attached documents get priority in the context budget.
-      const maxDocContextChars = 6000;
+      final int maxDocContextChars = this.maxDocContextChars;
 
       if (docHits.isNotEmpty) {
         debugLog('Adding ${docHits.length} document passages to context');
@@ -381,7 +386,7 @@ class KnowledgeService {
     // Hard cap on injected context — a flood of passages (large documents,
     // many attachments) would otherwise overflow the model's context window
     // and push out the actual question.
-    const maxContextChars = 6000;
+    final int maxContextChars = this.maxContextChars;
     if (kbHits.isNotEmpty && sb.length < maxContextChars) {
       sb.writeln(
         'Relevant notes from the student\'s bundled knowledge base '

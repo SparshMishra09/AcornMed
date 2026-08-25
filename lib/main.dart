@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'core/theme/app_theme.dart';
+import 'core/utils/performance_mode.dart';
 import 'data/services/document_service.dart';
 import 'data/services/knowledge_service.dart';
 import 'data/services/storage_service.dart';
@@ -73,6 +74,8 @@ class _RootGateState extends State<RootGate> {
   Future<void> _check() async {
     final prefs = await SharedPreferences.getInstance();
     if (!mounted) return;
+    // Apply the saved speed profile before the first model load.
+    applyFastModeNow(prefs.getBool('fastMode') ?? false);
     setState(() {
       _onboarded = prefs.getBool('onboarded') ?? false;
       _checkedOnboarding = true;
